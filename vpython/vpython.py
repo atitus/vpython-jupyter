@@ -97,7 +97,7 @@ __attrsb = {'userzoom':'a', 'userspin':'b', 'range':'c', 'autoscale':'d', 'fov':
           'right':'q', 'top':'r', 'bottom':'s', '_cloneid':'t',
           'logx':'u', 'logy':'v', 'dot':'w', 'dot_radius':'x',
           'markers':'y', 'legend':'z', 'label':'A', 'delta':'B', 'marker_color':'C',
-          'size_units':'D', 'userpan':'E', 'scroll':'F', 'integrate_selected':'G'}
+          'size_units':'D', 'userpan':'E', 'scroll':'F'}
 
 # methods are X in {'m': '23X....'}
 # pos is normally updated as an attribute, but for interval-based trails, it is updated (multiply) as a method
@@ -2027,7 +2027,6 @@ class gobj(baseObj):
         self._legend = False
         self._interval = -1
         self._graph = None
-        self._integrate_selected = False
         objName = args['_objName']
         del args['_objName']
         self._constructing = True ## calls are from constructor
@@ -2132,7 +2131,7 @@ class gobj(baseObj):
     def __del__(self):
         cmd = {"cmd": "delete", "idx": self.idx}
         self.appendcmd(cmd)
-        super(gcurve, self).__del__()
+        super(gobj, self).__del__()
 
     def resolveargs(self, *vars):
         ret = []
@@ -2247,13 +2246,6 @@ class gdots(gobj):
     def __init__(self, **args):
         args['_objName'] = "gdots"
         super(gdots, self).setup(args)
-
-    @property
-    def integrate_selected(self): return self._integrate_selected
-    @integrate_selected.setter
-    def integrate_selected(self,val):
-        self._integrate_selected = val
-        self.addattr('integrate_selected')
 
 class gvbars(gobj):
     def __init__(self, **args):
@@ -2727,7 +2719,7 @@ class Camera(object):
     @property
     def pos(self):
         c = self._canvas
-        return c.center-(norm(c.forward)*(c.range / tan(c.fov/2)))
+        return c.center-(norm(c.axis)*(c.range / tan(c.fov/2)))
     @pos.setter
     def pos(self, value):
         c = self._canvas
@@ -2736,12 +2728,12 @@ class Camera(object):
     @property
     def axis(self):
         c = self._canvas
-        return norm(c.forward)*( c.range / tan(c.fov/2) )
+        return norm(c._axis)*( c.range / tan(c.fov/2) )
     @axis.setter
     def axis(self, value):
         c = self._canvas
-        c.center = self.pos+value # use current self.pos before it is changed by change in c.forward
-        c.forward = norm(value)
+        c.center = self.pos+value # use current self.pos before it is changed by change in c.axis
+        c.axis = norm(value)
         c.range = mag(value)*tan(c.fov/2)
 
     @property
@@ -2752,14 +2744,17 @@ class Camera(object):
         self._canvas.up = value
 
     def rotate(self, angle=0, axis=None, origin=None):
+        if angle == 0: return
         c = self._canvas
         if axis is None: axis = c.up
-        newaxis = self.axis.rotate(angle=angle, axis=axis)
-        newpos = self.pos
-        if origin is not None:
-            newpos = origin + (self.pos-origin).rotate(angle=angle, axis=axis)
-        c.center = newpos + newaxis
-        c.forward = norm(newaxis)
+        if origin is not None and origin != self.pos:
+            origin = self.pos + (self.pos-origin).rotate(angle=angle, axis=axis)
+        else:
+            origin = self.pos
+        if c._axis.diff_angle(axis) > 1e-6:
+            c.axis = c._axis.rotate(angle=angle, axis=axis)
+        c.up = c._up.rotate(angle=angle, axis=axis)
+        c.center = origin + self.axis
 
 class meta_canvas(object):
     @property
@@ -2802,7 +2797,8 @@ class canvas(baseObj):
 
         # The following determine the view:
         self._range = 1 # user can alter with zoom
-        self._forward = vector(0,0,-1) # user can alter with spin
+        self._axis = vector(0,0,-1) # user can alter with spin
+        self._forward = vector(0,0,-1) # self.axis is primal internally; self._forward is now a synonym
         self._up = vector(0,1,0) # user with touch screen can rotate around z
         self._autoscale = True # set False if user zooms
         self._center = vector(0,0,0) # cannot be altered by user
@@ -3005,11 +3001,20 @@ class canvas(baseObj):
             raise TypeError('center must be a vector')
 
     @property
-    def forward(self):
-        return self._forward
+    def axis(self):
+        return self._axis
+    @axis.setter
+    def axis(self,value):
+        self._axis = self._set_forward = vector(value)
+        if not self._constructing:
+            self.appendcmd({"forward":value.value})
+
+    @property
+    def forward(self): # scene.forward is an external synonym for scene.axis
+        return self._axis
     @forward.setter
     def forward(self,value):
-        self._forward = self._set_forward = vector(value)
+        self._axis = self._set_forward = vector(value)
         if not self._constructing:
             self.appendcmd({"forward":value.value})
 
@@ -3129,7 +3134,6 @@ class canvas(baseObj):
             self.mouse.setpick( evt )
             self._waitfor = True # what pick is looking for
         elif ev == '_compound': # compound, text, extrusion
-            print('compound event return')
             obj = self._compound
             p = evt['pos']
             if obj._objName == 'text':
@@ -3140,6 +3144,7 @@ class canvas(baseObj):
                 # Set attribute_vector.value, which avoids nullifying the
                 # on_change functions that detect changes in e.g. obj.pos.y
                 obj._pos.value = list_to_vec(p)
+                obj._origin = obj._pos
                 s = evt['size']
                 obj._size.value = obj._size0 = list_to_vec(s)
                 obj._axis.value = obj._size._x*norm(obj._axis)
@@ -3192,7 +3197,7 @@ class canvas(baseObj):
             else:  ## user can change forward (spin), range/autoscale (zoom), up (touch), center (pan)
                 if 'forward' in evt and self.userspin and not self._set_forward:
                     fwd = evt['forward']
-                    self._forward = list_to_vec(fwd)
+                    self._axis = list_to_vec(fwd) # the fundamental meaning of scene.forward is scene.axis
                 self._set_forward = False
                 if 'up' in evt and self.userspin and not self._set_up:
                     cup = evt['up']
